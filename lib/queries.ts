@@ -53,7 +53,7 @@ export async function fetchContactsWithMeta(
   }
 
   const { data, error } = await query;
-  if (error) throw error;
+  if (error) throw new Error(`Supabase query failed: ${error.message}`);
 
   let contacts = data || [];
 

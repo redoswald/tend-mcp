@@ -570,7 +570,7 @@ const handler = createMcpHandler(
           location: params.location || null,
         });
 
-        if (eventError) throw eventError;
+        if (eventError) throw new Error(eventError.message);
 
         const eventContacts = matched.map((m) => ({
           eventId,
@@ -581,7 +581,7 @@ const handler = createMcpHandler(
           .from("EventContact")
           .insert(eventContacts);
 
-        if (ecError) throw ecError;
+        if (ecError) throw new Error(ecError.message);
 
         let actionItemsCreated = 0;
         if (params.action_items && params.action_items.length > 0) {
@@ -596,7 +596,7 @@ const handler = createMcpHandler(
             .from("ActionItem")
             .insert(items);
 
-          if (aiError) throw aiError;
+          if (aiError) throw new Error(aiError.message);
           actionItemsCreated = items.length;
         }
 
@@ -669,7 +669,7 @@ const handler = createMcpHandler(
           metroArea,
         });
 
-        if (contactError) throw contactError;
+        if (contactError) throw new Error(contactError.message);
 
         const tagNames = params.tags || [];
         const appliedTags: string[] = [];
@@ -690,7 +690,7 @@ const handler = createMcpHandler(
               .select()
               .single();
 
-            if (tagError) throw tagError;
+            if (tagError) throw new Error(tagError.message);
             existingTag = newTag;
           }
 
@@ -765,7 +765,7 @@ const handler = createMcpHandler(
             .from("Contact")
             .update(updateData)
             .eq("id", contact.id);
-          if (error) throw error;
+          if (error) throw new Error(error.message);
         }
 
         for (const tagName of params.add_tags || []) {
@@ -918,7 +918,7 @@ const handler = createMcpHandler(
           .update({ completed: true })
           .eq("id", actionItem.id);
 
-        if (error) throw error;
+        if (error) throw new Error(error.message);
 
         const result = {
           id: actionItem.id,
@@ -976,7 +976,7 @@ const handler = createMcpHandler(
             .from("Event")
             .update(updateData)
             .eq("id", params.event_id);
-          if (error) throw error;
+          if (error) throw new Error(error.message);
         }
 
         const warnings: string[] = [];
@@ -1048,7 +1048,7 @@ const handler = createMcpHandler(
           .delete()
           .eq("id", params.event_id);
 
-        if (error) throw error;
+        if (error) throw new Error(error.message);
 
         const result = {
           deleted: true,
