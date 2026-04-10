@@ -1088,7 +1088,6 @@ const verifyToken = async (
 
 const authHandler = withMcpAuth(handler, verifyToken, {
   required: true,
-  requiredScopes: ["mcp:tools"],
   resourceMetadataPath: "/.well-known/oauth-protected-resource",
 });
 
