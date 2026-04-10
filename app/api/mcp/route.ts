@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { createMcpHandler } from "mcp-handler";
+import { createMcpHandler, withMcpAuth } from "mcp-handler";
+import { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { createId } from "@paralleldrive/cuid2";
 import { createClient, getUserId } from "@/lib/supabase";
 import {
@@ -1068,29 +1069,27 @@ const handler = createMcpHandler(
   { basePath: "/api" }
 );
 
-// Bearer token auth middleware
-async function withAuth(req: Request, handlerFn: (req: Request) => Promise<Response>): Promise<Response> {
-  const token = process.env.MCP_BEARER_TOKEN;
-  if (!token) {
-    return new Response("Server misconfigured: missing MCP_BEARER_TOKEN", { status: 500 });
-  }
+// Verify bearer tokens — accepts both direct bearer tokens and OAuth-issued tokens
+const verifyToken = async (
+  _req: Request,
+  bearerToken?: string
+): Promise<AuthInfo | undefined> => {
+  if (!bearerToken) return undefined;
 
-  const authHeader = req.headers.get("authorization");
-  if (!authHeader || authHeader !== `Bearer ${token}`) {
-    return new Response("Unauthorized", { status: 401 });
-  }
+  const expected = process.env.MCP_BEARER_TOKEN;
+  if (!expected || bearerToken !== expected) return undefined;
 
-  return handlerFn(req);
-}
+  return {
+    token: bearerToken,
+    scopes: ["mcp:tools"],
+    clientId: "tend-user",
+  };
+};
 
-export async function GET(req: Request) {
-  return withAuth(req, handler);
-}
+const authHandler = withMcpAuth(handler, verifyToken, {
+  required: true,
+  requiredScopes: ["mcp:tools"],
+  resourceMetadataPath: "/.well-known/oauth-protected-resource",
+});
 
-export async function POST(req: Request) {
-  return withAuth(req, handler);
-}
-
-export async function DELETE(req: Request) {
-  return withAuth(req, handler);
-}
+export { authHandler as GET, authHandler as POST, authHandler as DELETE };
