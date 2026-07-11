@@ -24,9 +24,11 @@ export async function fetchContactsWithMeta(
 ) {
   let query = supabase
     .from("Contact")
-    .select("*, ContactTag(tagId, Tag:tagId(id, name, color)), ContactOOOPeriod(*)")
+    .select("*, ContactTag(tagId, Tag:tagId!inner(id, name, color)), ContactOOOPeriod(*)")
     .eq("userId", userId)
-    .eq("isSelf", false);
+    .eq("isSelf", false)
+    .is("deletedAt", null)
+    .is("ContactTag.Tag.deletedAt", null);
 
   if (!filters.includeArchived) {
     query = query.eq("isArchived", false);
@@ -89,8 +91,9 @@ export async function fetchLatestEventsForContacts(
 
   const { data: eventContacts } = await supabase
     .from("EventContact")
-    .select("contactId, event:eventId(id, title, date, eventType, location, userId)")
+    .select("contactId, event:eventId!inner(id, title, date, eventType, location, userId)")
     .in("contactId", contactIds)
+    .is("event.deletedAt", null)
     .order("event(date)", { ascending: false });
 
   const result = new Map<string, EventInfo>();
@@ -123,8 +126,9 @@ export async function fetchNextEventsForContacts(
 
   const { data: eventContacts } = await supabase
     .from("EventContact")
-    .select("contactId, event:eventId(id, title, date, eventType, location, userId)")
+    .select("contactId, event:eventId!inner(id, title, date, eventType, location, userId)")
     .in("contactId", contactIds)
+    .is("event.deletedAt", null)
     .order("event(date)", { ascending: true });
 
   const result = new Map<string, EventInfo>();
@@ -190,6 +194,7 @@ export async function fetchSelfContact(supabase: SupabaseClient, userId: string)
     .select("id, name, ContactOOOPeriod(*)")
     .eq("userId", userId)
     .eq("isSelf", true)
+    .is("deletedAt", null)
     .single();
 
   return data;

@@ -31,7 +31,8 @@ export async function resolveContactNames(
     .select("id, name, nickname")
     .eq("userId", userId)
     .eq("isSelf", false)
-    .eq("isArchived", false);
+    .eq("isArchived", false)
+    .is("deletedAt", null);
 
   const allContacts = (contacts || []) as ContactRow[];
   const matched: { inputName: string; id: string; name: string }[] = [];
@@ -68,6 +69,7 @@ export async function resolveContactByNameOrId(
       .select("*")
       .eq("id", contactId)
       .eq("userId", userId)
+      .is("deletedAt", null)
       .single();
     if (data) return { contact: data as ContactRow, warning: null };
     return { contact: null, warning: `Contact with ID "${contactId}" not found` };
@@ -81,7 +83,8 @@ export async function resolveContactByNameOrId(
     .from("Contact")
     .select("*")
     .eq("userId", userId)
-    .eq("isSelf", false);
+    .eq("isSelf", false)
+    .is("deletedAt", null);
 
   const allContacts = (contacts || []) as ContactRow[];
   const result = matchContact(name, allContacts);

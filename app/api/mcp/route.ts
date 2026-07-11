@@ -16,8 +16,51 @@ import { formatDateForOutput, parseLocalDateToUTC, todayAtNoonUTC } from "@/lib/
 import { daysBetween } from "@/lib/cadence";
 import { resolveContactByNameOrId, resolveContactNames } from "@/lib/fuzzy";
 import { normalizeMetroArea } from "@/lib/metro";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
+
+/**
+ * Find a tag by name, reviving a soft-deleted one when that's what holds the
+ * name (mirrors tend-web's POST /api/tags revive-on-create semantics — Tag is
+ * unique on [userId, name], so a soft-deleted row would otherwise block
+ * re-creating the tag). Inserts a new tag only when no row exists at all.
+ */
+async function getOrReviveTag(
+  supabase: SupabaseClient,
+  userId: string,
+  tagName: string
+): Promise<{ id: string; name: string }> {
+  // Deliberately no deletedAt filter — we need to see soft-deleted rows here.
+  const { data: existing, error: lookupError } = await supabase
+    .from("Tag")
+    .select("id, name, deletedAt")
+    .eq("userId", userId)
+    .eq("name", tagName)
+    .maybeSingle();
+
+  if (lookupError) throw new Error(lookupError.message);
+
+  if (existing) {
+    if (existing.deletedAt) {
+      const { error: reviveError } = await supabase
+        .from("Tag")
+        .update({ deletedAt: null })
+        .eq("id", existing.id);
+      if (reviveError) throw new Error(reviveError.message);
+    }
+    return { id: existing.id, name: existing.name };
+  }
+
+  const { data: newTag, error: insertError } = await supabase
+    .from("Tag")
+    .insert({ id: createId(), userId, name: tagName })
+    .select("id, name")
+    .single();
+
+  if (insertError) throw new Error(insertError.message);
+  return newTag;
+}
 
 const handler = createMcpHandler(
   (server) => {
@@ -118,8 +161,9 @@ const handler = createMcpHandler(
 
         const { data: tagRows } = await supabase
           .from("ContactTag")
-          .select("Tag:tagId(name, color)")
-          .eq("contactId", contact.id);
+          .select("Tag:tagId!inner(name, color)")
+          .eq("contactId", contact.id)
+          .is("Tag.deletedAt", null);
 
         const { data: oooPeriods } = await supabase
           .from("ContactOOOPeriod")
@@ -129,13 +173,15 @@ const handler = createMcpHandler(
 
         const { data: rels1 } = await supabase
           .from("ContactRelationship")
-          .select("relatedId, relationshipType, RelatedContact:relatedId(name)")
-          .eq("contactId", contact.id);
+          .select("relatedId, relationshipType, RelatedContact:relatedId!inner(name)")
+          .eq("contactId", contact.id)
+          .is("RelatedContact.deletedAt", null);
 
         const { data: rels2 } = await supabase
           .from("ContactRelationship")
-          .select("contactId, relationshipType, SourceContact:contactId(name)")
-          .eq("relatedId", contact.id);
+          .select("contactId, relationshipType, SourceContact:contactId!inner(name)")
+          .eq("relatedId", contact.id)
+          .is("SourceContact.deletedAt", null);
 
         const relationships = [
           ...(rels1 || []).map((r: any) => ({
@@ -155,8 +201,9 @@ const handler = createMcpHandler(
 
         const { data: eventContacts } = await supabase
           .from("EventContact")
-          .select("event:eventId(id, title, date, eventType, notes, location, userId, ActionItem(*)), contactId")
+          .select("event:eventId!inner(id, title, date, eventType, notes, location, userId, ActionItem(*)), contactId")
           .eq("contactId", contact.id)
+          .is("event.deletedAt", null)
           .order("event(date)", { ascending: false })
           .limit(20);
 
@@ -171,9 +218,10 @@ const handler = createMcpHandler(
 
           const { data: otherECs } = await supabase
             .from("EventContact")
-            .select("contact:contactId(name)")
+            .select("contact:contactId!inner(name)")
             .eq("eventId", event.id)
-            .neq("contactId", contact.id);
+            .neq("contactId", contact.id)
+            .is("contact.deletedAt", null);
 
           events.push({
             id: event.id,
@@ -193,8 +241,9 @@ const handler = createMcpHandler(
 
         const { count: totalEvents } = await supabase
           .from("EventContact")
-          .select("eventId", { count: "exact", head: true })
-          .eq("contactId", contact.id);
+          .select("eventId, event:eventId!inner(id)", { count: "exact", head: true })
+          .eq("contactId", contact.id)
+          .is("event.deletedAt", null);
 
         const firstEventDate = events.length > 0 ? events[events.length - 1].date : null;
 
@@ -283,8 +332,10 @@ const handler = createMcpHandler(
 
         const { data: eventRows } = await supabase
           .from("Event")
-          .select("id, title, date, eventType, location, EventContact(contact:contactId(name, metroArea))")
+          .select("id, title, date, eventType, location, EventContact(contact:contactId!inner(name, metroArea))")
           .eq("userId", userId)
+          .is("deletedAt", null)
+          .is("EventContact.contact.deletedAt", null)
           .gte("date", now.toISOString())
           .lte("date", endDate.toISOString())
           .order("date", { ascending: true });
@@ -315,7 +366,8 @@ const handler = createMcpHandler(
 
         const { data: oooContacts } = await supabase
           .from("ContactOOOPeriod")
-          .select("startDate, endDate, label, destination, contact:contactId(name, userId, isSelf)")
+          .select("startDate, endDate, label, destination, contact:contactId!inner(name, userId, isSelf)")
+          .is("contact.deletedAt", null)
           .lte("startDate", endDate.toISOString())
           .gte("endDate", now.toISOString());
 
@@ -408,8 +460,10 @@ const handler = createMcpHandler(
 
         const { data: upcomingEventRows } = await supabase
           .from("Event")
-          .select("title, date, location, EventContact(contact:contactId(name))")
+          .select("title, date, location, EventContact(contact:contactId!inner(name))")
           .eq("userId", userId)
+          .is("deletedAt", null)
+          .is("EventContact.contact.deletedAt", null)
           .gte("date", now.toISOString())
           .lte("date", weekEnd.toISOString())
           .order("date", { ascending: true });
@@ -423,7 +477,8 @@ const handler = createMcpHandler(
 
         const { data: allBirthdays } = await supabase
           .from("ImportantDate")
-          .select("day, month, year, contact:contactId(name, userId)")
+          .select("day, month, year, contact:contactId!inner(name, userId)")
+          .is("contact.deletedAt", null)
           .eq("dateType", "BIRTHDAY");
 
         const MONTH_NAMES = [
@@ -449,19 +504,28 @@ const handler = createMcpHandler(
 
         const { data: actionItems } = await supabase
           .from("ActionItem")
-          .select("id, description, event:eventId(title, EventContact(contact:contactId(name, userId)))")
-          .eq("completed", false);
+          // Deleted-contact filtering happens in JS below (via the selected
+          // deletedAt column) — PostgREST embedded filters only document
+          // two levels of nesting, and this path is three deep.
+          .select("id, description, event:eventId!inner(title, EventContact(contact:contactId(name, userId, deletedAt)))")
+          .eq("completed", false)
+          .is("event.deletedAt", null);
 
         const openActionItems = (actionItems || [])
-          .filter((ai: any) => {
-            const contacts = ai.event?.EventContact || [];
-            return contacts.some((ec: any) => ec.contact?.userId === userId);
-          })
           .map((ai: any) => ({
+            ai,
+            liveContacts: (ai.event?.EventContact || []).filter(
+              (ec: any) => ec.contact && !ec.contact.deletedAt
+            ),
+          }))
+          .filter(({ liveContacts }: any) =>
+            liveContacts.some((ec: any) => ec.contact.userId === userId)
+          )
+          .map(({ ai, liveContacts }: any) => ({
             id: ai.id,
             description: ai.description,
             fromEvent: ai.event?.title,
-            contact: (ai.event?.EventContact || [])
+            contact: liveContacts
               .map((ec: any) => ec.contact?.name)
               .filter(Boolean)
               .join(", "),
@@ -480,12 +544,14 @@ const handler = createMcpHandler(
           .from("Event")
           .select("id", { count: "exact", head: true })
           .eq("userId", userId)
+          .is("deletedAt", null)
           .gte("date", thisMonthStart.toISOString());
 
         const { count: eventsLastMonth } = await supabase
           .from("Event")
           .select("id", { count: "exact", head: true })
           .eq("userId", userId)
+          .is("deletedAt", null)
           .gte("date", lastMonthStart.toISOString())
           .lt("date", thisMonthStart.toISOString());
 
@@ -605,7 +671,8 @@ const handler = createMcpHandler(
         const { data: fullContacts } = await supabase
           .from("Contact")
           .select("*, ContactOOOPeriod(*)")
-          .in("id", matchedIds);
+          .in("id", matchedIds)
+          .is("deletedAt", null);
 
         const latestEvents = await fetchLatestEventsForContacts(supabase, userId, matchedIds);
         const nextEventsData = await fetchNextEventsForContacts(supabase, userId, matchedIds);
@@ -675,30 +742,13 @@ const handler = createMcpHandler(
         const appliedTags: string[] = [];
 
         for (const tagName of tagNames) {
-          let { data: existingTag } = await supabase
-            .from("Tag")
-            .select("id, name")
-            .eq("userId", userId)
-            .eq("name", tagName)
-            .single();
-
-          if (!existingTag) {
-            const tagId = createId();
-            const { data: newTag, error: tagError } = await supabase
-              .from("Tag")
-              .insert({ id: tagId, userId, name: tagName })
-              .select()
-              .single();
-
-            if (tagError) throw new Error(tagError.message);
-            existingTag = newTag;
-          }
+          const tag = await getOrReviveTag(supabase, userId, tagName);
 
           await supabase
             .from("ContactTag")
-            .insert({ contactId, tagId: existingTag!.id });
+            .insert({ contactId, tagId: tag.id });
 
-          appliedTags.push(existingTag!.name);
+          appliedTags.push(tag.name);
         }
 
         const result = {
@@ -769,27 +819,14 @@ const handler = createMcpHandler(
         }
 
         for (const tagName of params.add_tags || []) {
-          let { data: existingTag } = await supabase
-            .from("Tag")
-            .select("id")
-            .eq("userId", userId)
-            .eq("name", tagName)
-            .single();
+          // Throws on lookup/insert/revive failure instead of silently
+          // skipping the tag (previously the insert error was swallowed).
+          const tag = await getOrReviveTag(supabase, userId, tagName);
 
-          if (!existingTag) {
-            const { data: newTag } = await supabase
-              .from("Tag")
-              .insert({ id: createId(), userId, name: tagName })
-              .select()
-              .single();
-            existingTag = newTag;
-          }
-
-          if (existingTag) {
-            await supabase
-              .from("ContactTag")
-              .upsert({ contactId: contact.id, tagId: existingTag.id });
-          }
+          const { error: linkError } = await supabase
+            .from("ContactTag")
+            .upsert({ contactId: contact.id, tagId: tag.id });
+          if (linkError) throw new Error(linkError.message);
         }
 
         for (const tagName of params.remove_tags || []) {
@@ -798,6 +835,7 @@ const handler = createMcpHandler(
             .select("id")
             .eq("userId", userId)
             .eq("name", tagName)
+            .is("deletedAt", null)
             .single();
 
           if (tag) {
@@ -811,8 +849,10 @@ const handler = createMcpHandler(
 
         const { data: updated } = await supabase
           .from("Contact")
-          .select("*, ContactTag(Tag:tagId(name, color)), ContactOOOPeriod(*)")
+          .select("*, ContactTag(Tag:tagId!inner(name, color)), ContactOOOPeriod(*)")
           .eq("id", contact.id)
+          .is("deletedAt", null)
+          .is("ContactTag.Tag.deletedAt", null)
           .single();
 
         const latestEvents = await fetchLatestEventsForContacts(supabase, userId, [contact.id]);
@@ -857,8 +897,9 @@ const handler = createMcpHandler(
         if (params.action_item_id) {
           const { data } = await supabase
             .from("ActionItem")
-            .select("*, event:eventId(title, userId, EventContact(contact:contactId(name)))")
+            .select("*, event:eventId!inner(title, userId, EventContact(contact:contactId(name, deletedAt)))")
             .eq("id", params.action_item_id)
+            .is("event.deletedAt", null)
             .single();
 
           if (data && (data.event as any)?.userId === userId) {
@@ -867,8 +908,9 @@ const handler = createMcpHandler(
         } else if (params.description_search) {
           const { data: items } = await supabase
             .from("ActionItem")
-            .select("*, event:eventId(title, userId, EventContact(contact:contactId(name)))")
+            .select("*, event:eventId!inner(title, userId, EventContact(contact:contactId(name, deletedAt)))")
             .eq("completed", false)
+            .is("event.deletedAt", null)
             .ilike("description", `%${params.description_search}%`);
 
           const userItems = (items || []).filter(
@@ -926,7 +968,10 @@ const handler = createMcpHandler(
           completed: true,
           fromEvent: actionItem.event?.title,
           contacts: (actionItem.event?.EventContact || [])
-            .map((ec: any) => ec.contact?.name)
+            // Deleted-contact filtering in JS — the embedded-filter path here
+            // would be three levels deep (event.EventContact.contact).
+            .filter((ec: any) => ec.contact && !ec.contact.deletedAt)
+            .map((ec: any) => ec.contact.name)
             .filter(Boolean),
         };
 
@@ -954,6 +999,7 @@ const handler = createMcpHandler(
           .from("Event")
           .select("id, title, date, eventType, notes, location, userId")
           .eq("id", params.event_id)
+          .is("deletedAt", null)
           .single();
 
         if (!existing || (existing as any).userId !== userId) {
@@ -1000,8 +1046,10 @@ const handler = createMcpHandler(
 
         const { data: updated } = await supabase
           .from("Event")
-          .select("id, title, date, eventType, notes, location, EventContact(contact:contactId(name))")
+          .select("id, title, date, eventType, notes, location, EventContact(contact:contactId!inner(name))")
           .eq("id", params.event_id)
+          .is("deletedAt", null)
+          .is("EventContact.contact.deletedAt", null)
           .single();
 
         const result = {
@@ -1033,8 +1081,10 @@ const handler = createMcpHandler(
       async (params) => {
         const { data: existing } = await supabase
           .from("Event")
-          .select("id, title, userId, EventContact(contact:contactId(name))")
+          .select("id, title, userId, EventContact(contact:contactId!inner(name))")
           .eq("id", params.event_id)
+          .is("deletedAt", null)
+          .is("EventContact.contact.deletedAt", null)
           .single();
 
         if (!existing || (existing as any).userId !== userId) {
