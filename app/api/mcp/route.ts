@@ -2,7 +2,7 @@ import { z } from "zod";
 import { createMcpHandler, withMcpAuth } from "mcp-handler";
 import { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { createId } from "@paralleldrive/cuid2";
-import { createClient, getUserId } from "@/lib/supabase";
+import { createClient, anonClient, resolveTendUserId } from "@/lib/supabase";
 import {
   fetchContactsWithMeta,
   fetchLatestEventsForContacts,
@@ -62,10 +62,20 @@ async function getOrReviveTag(
   return newTag;
 }
 
+/**
+ * Per-request Tend user id (Prisma User.id), resolved from the verified
+ * bearer JWT in verifyToken. This is the isolation layer — Tend tables
+ * have no RLS policies, so every query must filter by it.
+ */
+function tendUserId(extra: { authInfo?: AuthInfo }): string {
+  const userId = extra.authInfo?.extra?.tendUserId as string | undefined;
+  if (!userId) throw new Error("Missing authenticated user context");
+  return userId;
+}
+
 const handler = createMcpHandler(
   (server) => {
     const supabase = createClient();
-    const userId = getUserId();
 
     // ─── get_contacts ───────────────────────────────────────────
     server.tool(
@@ -80,7 +90,9 @@ const handler = createMcpHandler(
         include_archived: z.boolean().optional().describe("Include archived contacts"),
         limit: z.number().optional().describe("Max results (default 25, max 100)"),
       },
-      async (params) => {
+      { readOnlyHint: true, openWorldHint: false },
+      async (params, extra) => {
+        const userId = tendUserId(extra);
         const limit = Math.min(params.limit || 25, 100);
 
         const contacts = await fetchContactsWithMeta(supabase, userId, {
@@ -150,7 +162,9 @@ const handler = createMcpHandler(
         contact_id: z.string().optional().describe("Contact ID"),
         name: z.string().optional().describe("Contact name (fuzzy matched)"),
       },
-      async (params) => {
+      { readOnlyHint: true, openWorldHint: false },
+      async (params, extra) => {
+        const userId = tendUserId(extra);
         const { contact, warning } = await resolveContactByNameOrId(
           supabase, userId, { contactId: params.contact_id, name: params.name }
         );
@@ -324,7 +338,9 @@ const handler = createMcpHandler(
       {
         days_ahead: z.number().optional().describe("Days to look ahead (default 14, max 90)"),
       },
-      async (params) => {
+      { readOnlyHint: true, openWorldHint: false },
+      async (params, extra) => {
+        const userId = tendUserId(extra);
         const daysAhead = Math.min(params.days_ahead || 14, 90);
         const now = new Date();
         const endDate = new Date(now);
@@ -394,7 +410,9 @@ const handler = createMcpHandler(
       "get_social_summary",
       "Get a high-level summary of relationship health. Returns overdue contacts, upcoming events, who's currently away, open action items, upcoming birthdays, and funnel stage distribution. Use for morning briefings or general check-ins.",
       {},
-      async () => {
+      { readOnlyHint: true, openWorldHint: false },
+      async (_params, extra) => {
+        const userId = tendUserId(extra);
         const now = new Date();
 
         const contacts = await fetchContactsWithMeta(supabase, userId);
@@ -606,7 +624,9 @@ const handler = createMcpHandler(
         location: z.string().optional().describe("Where it happened"),
         action_items: z.array(z.string()).optional().describe("Follow-up items"),
       },
-      async (params) => {
+      { destructiveHint: false, openWorldHint: false },
+      async (params, extra) => {
+        const userId = tendUserId(extra);
         const { matched, warnings } = await resolveContactNames(
           supabase, userId, params.contact_names
         );
@@ -720,7 +740,9 @@ const handler = createMcpHandler(
         metro_area: z.string().optional().describe("Where they live"),
         tags: z.array(z.string()).optional().describe("Tag names (created if new)"),
       },
-      async (params) => {
+      { destructiveHint: false, openWorldHint: false },
+      async (params, extra) => {
+        const userId = tendUserId(extra);
         const contactId = createId();
         const metroArea = normalizeMetroArea(params.metro_area);
 
@@ -788,7 +810,9 @@ const handler = createMcpHandler(
         add_tags: z.array(z.string()).optional().describe("Tags to add"),
         remove_tags: z.array(z.string()).optional().describe("Tags to remove"),
       },
-      async (params) => {
+      { destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      async (params, extra) => {
+        const userId = tendUserId(extra);
         const { contact, warning } = await resolveContactByNameOrId(
           supabase, userId, { contactId: params.contact_id, name: params.name }
         );
@@ -891,7 +915,9 @@ const handler = createMcpHandler(
         action_item_id: z.string().optional().describe("Action item ID"),
         description_search: z.string().optional().describe("Fuzzy match on description"),
       },
-      async (params) => {
+      { destructiveHint: false, openWorldHint: false },
+      async (params, extra) => {
+        const userId = tendUserId(extra);
         let actionItem: any = null;
 
         if (params.action_item_id) {
@@ -994,7 +1020,9 @@ const handler = createMcpHandler(
         event_type: z.string().optional().describe("HANGOUT, CALL, MESSAGE, EVENT, OTHER"),
         contact_names: z.array(z.string()).optional().describe("Replace contacts (fuzzy matched). Omit to keep existing."),
       },
-      async (params) => {
+      { destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      async (params, extra) => {
+        const userId = tendUserId(extra);
         const { data: existing } = await supabase
           .from("Event")
           .select("id, title, date, eventType, notes, location, userId")
@@ -1078,7 +1106,9 @@ const handler = createMcpHandler(
       {
         event_id: z.string().describe("Event ID to delete"),
       },
-      async (params) => {
+      { destructiveHint: true, openWorldHint: false },
+      async (params, extra) => {
+        const userId = tendUserId(extra);
         const { data: existing } = await supabase
           .from("Event")
           .select("id, title, userId, EventContact(contact:contactId!inner(name))")
@@ -1114,25 +1144,77 @@ const handler = createMcpHandler(
         };
       }
     );
+
+    // ─── Prompts ────────────────────────────────────────────────
+    // Workflow templates surfaced natively in MCP clients (claude.ai's
+    // "+" prompt picker, /mcp__tend__* in Claude Code).
+
+    server.registerPrompt(
+      "social_review",
+      {
+        title: "Social review",
+        description: "Review relationship health: who's overdue, what's coming up, and open action items.",
+      },
+      () => ({
+        messages: [
+          {
+            role: "user" as const,
+            content: {
+              type: "text" as const,
+              text: `Give me a social review from Tend. Call get_social_summary, then walk me through it conversationally: who am I most overdue to reach out to (and what did we last talk about — use get_contact_detail for the top few), what's coming up (birthdays, planned events), anyone currently away, and my open action items. End with two or three concrete suggestions of who to ping this week and why. If I commit to any, log them as planned events with log_event.`,
+            },
+          },
+        ],
+      })
+    );
+
+    server.registerPrompt(
+      "log_catchup",
+      {
+        title: "Log a catch-up",
+        description: "Capture a hangout or conversation: what happened, mentions, and follow-ups.",
+      },
+      () => ({
+        messages: [
+          {
+            role: "user" as const,
+            content: {
+              type: "text" as const,
+              text: `I just caught up with someone — help me log it in Tend. Ask me who it was, when and how we met (in person, call, text), and what we talked about. Pull their profile with get_contact_detail so you can connect what I say to what's already there. Then record it with log_event, capturing any mentions of other people and any follow-ups I promised as action items. Keep it quick — a couple of questions, then log it.`,
+            },
+          },
+        ],
+      })
+    );
   },
   {},
   { basePath: "/api" }
 );
 
-// Verify bearer tokens — accepts both direct bearer tokens and OAuth-issued tokens
+// Verify bearer tokens: the token is the user's Supabase session JWT.
+// GoTrue validates it, then we map the auth user to Tend's Prisma User.id
+// (creating the row on first contact) — that id scopes every query.
 const verifyToken = async (
   _req: Request,
   bearerToken?: string
 ): Promise<AuthInfo | undefined> => {
   if (!bearerToken) return undefined;
 
-  const expected = process.env.MCP_BEARER_TOKEN;
-  if (!expected || bearerToken !== expected) return undefined;
+  const { data, error } = await anonClient().auth.getUser(bearerToken);
+  if (error || !data.user) return undefined;
+
+  let tendUser: string;
+  try {
+    tendUser = await resolveTendUserId(data.user);
+  } catch {
+    return undefined;
+  }
 
   return {
     token: bearerToken,
     scopes: ["mcp:tools"],
-    clientId: "tend-user",
+    clientId: data.user.id,
+    extra: { tendUserId: tendUser },
   };
 };
 

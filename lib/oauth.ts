@@ -1,28 +1,32 @@
 /**
- * Stateless OAuth helpers for single-user MCP auth.
+ * Stateless OAuth helpers for multi-user MCP auth.
  *
- * Auth codes are signed tokens (HMAC-SHA256) containing the client_id,
- * redirect_uri, code_challenge, and expiry. No server-side storage needed.
+ * Auth codes are AES-256-GCM encrypted payloads containing the client_id,
+ * redirect_uri, code_challenge, the user's Supabase refresh token, and an
+ * expiry. Encrypted rather than merely signed because the refresh token
+ * transits the client's redirect URL. No server-side storage needed.
  */
 
 const AUTH_CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-async function hmacSign(data: string, secret: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(data));
-  return base64url(new Uint8Array(sig));
+export interface AuthCodePayload {
+  clientId: string;
+  redirectUri: string;
+  codeChallenge: string;
+  userId: string;
+  refreshToken: string;
+  expiry: number;
 }
 
-async function hmacVerify(data: string, signature: string, secret: string): Promise<boolean> {
-  const expected = await hmacSign(data, secret);
-  return expected === signature;
+async function deriveKey(secret: string): Promise<CryptoKey> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(secret)
+  );
+  return crypto.subtle.importKey("raw", digest, { name: "AES-GCM" }, false, [
+    "encrypt",
+    "decrypt",
+  ]);
 }
 
 function base64url(bytes: Uint8Array): string {
@@ -31,29 +35,32 @@ function base64url(bytes: Uint8Array): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-function base64urlDecode(str: string): string {
+function base64urlToBytes(str: string): Uint8Array<ArrayBuffer> {
   const padded = str.replace(/-/g, "+").replace(/_/g, "/");
-  return atob(padded);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(new ArrayBuffer(binary.length));
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
 }
 
 export async function createAuthCode(
-  clientId: string,
-  redirectUri: string,
-  codeChallenge: string,
+  payload: Omit<AuthCodePayload, "expiry">,
   secret: string
 ): Promise<string> {
-  const expiry = Date.now() + AUTH_CODE_TTL_MS;
-  const payload = `${clientId}|${redirectUri}|${codeChallenge}|${expiry}`;
-  const payloadB64 = base64url(new TextEncoder().encode(payload));
-  const sig = await hmacSign(payload, secret);
-  return `${payloadB64}.${sig}`;
-}
+  const data = JSON.stringify({
+    ...payload,
+    expiry: Date.now() + AUTH_CODE_TTL_MS,
+  } satisfies AuthCodePayload);
 
-interface AuthCodePayload {
-  clientId: string;
-  redirectUri: string;
-  codeChallenge: string;
-  expiry: number;
+  const key = await deriveKey(secret);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    new TextEncoder().encode(data)
+  );
+
+  return `${base64url(iv)}.${base64url(new Uint8Array(ciphertext))}`;
 }
 
 export async function verifyAuthCode(
@@ -63,26 +70,25 @@ export async function verifyAuthCode(
   const parts = code.split(".");
   if (parts.length !== 2) return null;
 
-  const [payloadB64, sig] = parts;
-  let payload: string;
   try {
-    payload = base64urlDecode(payloadB64);
+    const key = await deriveKey(secret);
+    const iv = base64urlToBytes(parts[0]);
+    const ciphertext = base64urlToBytes(parts[1]);
+    const plaintext = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv },
+      key,
+      ciphertext
+    );
+    const payload = JSON.parse(
+      new TextDecoder().decode(plaintext)
+    ) as AuthCodePayload;
+
+    if (Date.now() > payload.expiry) return null;
+    return payload;
   } catch {
+    // Wrong key, tampered ciphertext, or malformed payload
     return null;
   }
-
-  const valid = await hmacVerify(payload, sig, secret);
-  if (!valid) return null;
-
-  const segments = payload.split("|");
-  if (segments.length !== 4) return null;
-
-  const [clientId, redirectUri, codeChallenge, expiryStr] = segments;
-  const expiry = parseInt(expiryStr, 10);
-
-  if (Date.now() > expiry) return null;
-
-  return { clientId, redirectUri, codeChallenge, expiry };
 }
 
 export async function verifyPKCE(
