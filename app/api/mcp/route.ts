@@ -654,6 +654,8 @@ const handler = createMcpHandler(
           eventType: params.event_type || "HANGOUT",
           notes: params.notes || null,
           location: params.location || null,
+          // NOT NULL, no DB default — Prisma sets @updatedAt in tend-web.
+          updatedAt: new Date().toISOString(),
         });
 
         if (eventError) throw new Error(eventError.message);
@@ -676,6 +678,8 @@ const handler = createMcpHandler(
             eventId,
             description: desc,
             completed: false,
+            // NOT NULL, no DB default — Prisma sets @updatedAt in tend-web.
+            updatedAt: new Date().toISOString(),
           }));
 
           const { error: aiError } = await supabase
@@ -756,6 +760,9 @@ const handler = createMcpHandler(
           cadenceDays: params.cadence_days || null,
           funnelStage: params.stage || "ACQUAINTANCE",
           metroArea,
+          // Prisma fills @updatedAt in tend-web; supabase-js must set it —
+          // the column is NOT NULL with no DB default.
+          updatedAt: new Date().toISOString(),
         });
 
         if (contactError) throw new Error(contactError.message);
@@ -835,6 +842,7 @@ const handler = createMcpHandler(
         }
 
         if (Object.keys(updateData).length > 0) {
+          updateData.updatedAt = new Date().toISOString();
           const { error } = await supabase
             .from("Contact")
             .update(updateData)
@@ -983,7 +991,7 @@ const handler = createMcpHandler(
 
         const { error } = await supabase
           .from("ActionItem")
-          .update({ completed: true })
+          .update({ completed: true, updatedAt: new Date().toISOString() })
           .eq("id", actionItem.id);
 
         if (error) throw new Error(error.message);
@@ -1046,6 +1054,7 @@ const handler = createMcpHandler(
         }
 
         if (Object.keys(updateData).length > 0) {
+          updateData.updatedAt = new Date().toISOString();
           const { error } = await supabase
             .from("Event")
             .update(updateData)

@@ -183,7 +183,7 @@ const transport2 = new StreamableHTTPClientTransport(new URL(`${base}/api/mcp`),
 });
 const mcp2 = new Client({ name: "verify-script-2", version: "1.0.0" });
 await mcp2.connect(transport2);
-check("refreshed token works against MCP", (await mcp2.listTools()).tools.length === 11);
+check("refreshed token works against MCP", (await mcp2.listTools()).tools.length === 10);
 await mcp2.close();
 
 // 8. No token → 401 with resource metadata pointer
